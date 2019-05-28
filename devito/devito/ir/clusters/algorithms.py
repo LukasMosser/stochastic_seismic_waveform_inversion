@@ -1,0 +1,263 @@
+from collections import OrderedDict
+
+from devito.ir.support import (Scope, IterationSpace, detect_flow_directions,
+                               force_directions, group_expressions)
+from devito.ir.clusters.cluster import PartialCluster, ClusterGroup
+from devito.symbolics import CondEq, CondNe, IntDiv, xreplace_indices
+from devito.types import Scalar
+from devito.tools import flatten, powerset
+
+__all__ = ['clusterize', 'groupby']
+
+
+def groupby(clusters):
+    """
+    Attempt grouping :class:`PartialCluster`s together to create bigger
+    :class:`PartialCluster`s (i.e., containing more expressions).
+
+    .. note::
+
+        This function relies on advanced data dependency analysis tools
+        based upon classic Lamport theory.
+    """
+    clusters = clusters.unfreeze()
+
+    processed = ClusterGroup()
+    for c in clusters:
+        if c.guards:
+            # Guarded clusters cannot be grouped together
+            processed.append(c)
+            continue
+        fused = False
+        for candidate in reversed(list(processed)):
+            # Collect all relevant data dependences
+            scope = Scope(exprs=candidate.exprs + c.exprs)
+
+            # Collect anti-dependences preventing grouping
+            anti = scope.d_anti.carried() - scope.d_anti.increment
+            funcs = [i.function for i in anti]
+
+            # Collect flow-dependences breaking the search
+            flow = scope.d_flow - (scope.d_flow.inplace() + scope.d_flow.increment)
+            flow = {i.cause for i in flow}
+
+            if candidate.ispace.is_compatible(c.ispace) and\
+                    all(is_local(i, candidate, c, clusters) for i in funcs):
+                # /c/ will be fused into /candidate/. All fusion-induced anti
+                # dependences are eliminated through so called "index bumping and
+                # array contraction", which transforms array accesses into scalars
+
+                # Optimization: we also bump-and-contract the Arrays inducing
+                # non-carried dependences, to avoid useless memory accesses
+                funcs += [i.function for i in scope.d_flow.independent()
+                          if is_local(i.function, candidate, c, clusters)]
+
+                bump_and_contract(funcs, candidate, c)
+                candidate.squash(c)
+                fused = True
+                break
+            elif anti:
+                # Data dependences prevent fusion with earlier clusters, so
+                # must break up the search
+                c.atomics.update(set(anti.cause))
+                break
+            elif set(flow).intersection(candidate.atomics):
+                # We cannot even attempt fusing with earlier clusters, as
+                # otherwise the existing flow dependences wouldn't be honored
+                break
+        # Fallback
+        if not fused:
+            processed.append(c)
+
+    return processed
+
+
+def guard(clusters):
+    """
+    Return a new :class:`ClusterGroup` including new :class:`PartialCluster`s
+    for each conditional expression encountered in ``clusters``.
+    """
+    processed = ClusterGroup()
+    for c in clusters:
+        # Find out what expressions in /c/ should be guarded
+        mapper = {}
+        for e in c.exprs:
+            for k, v in e.ispace.sub_iterators.items():
+                for i in v:
+                    if i.dim.is_Conditional:
+                        mapper.setdefault(i.dim, []).append(e)
+
+        # Build conditional expressions to guard clusters
+        conditions = {d: CondEq(d.parent % d.factor, 0) for d in mapper}
+        negated = {d: CondNe(d.parent % d.factor, 0) for d in mapper}
+
+        # Expand with guarded clusters
+        combs = list(powerset(mapper))
+        for dims, ndims in zip(combs, reversed(combs)):
+            banned = flatten(v for k, v in mapper.items() if k not in dims)
+            exprs = [e.xreplace({i: IntDiv(i.parent, i.factor) for i in mapper})
+                     for e in c.exprs if e not in banned]
+            guards = [(i.parent, conditions[i]) for i in dims]
+            guards.extend([(i.parent, negated[i]) for i in ndims])
+            cluster = PartialCluster(exprs, c.ispace, c.dspace, c.atomics, dict(guards))
+            processed.append(cluster)
+
+    return processed
+
+
+def is_local(array, source, sink, context):
+    """
+    Return True if ``array`` satisfies the following conditions: ::
+
+        * it's a temporary; that is, of type :class:`Array`;
+        * it's written once, within the ``source`` :class:`PartialCluster`, and
+          its value only depends on global data;
+        * it's read in the ``sink`` :class:`PartialCluster` only; in particular,
+          it doesn't appear in any other :class:`PartialCluster`s out of those
+          provided in ``context``.
+
+    If any of these conditions do not hold, return False.
+    """
+    if not array.is_Array:
+        return False
+
+    # Written in source
+    written_once = False
+    for i in source.trace.values():
+        if array == i.function:
+            if written_once is True:
+                # Written more than once, break
+                written_once = False
+                break
+            reads = [j.base.function for j in i.reads]
+            if any(j.is_TensorFunction or j.is_Scalar for j in reads):
+                # Can't guarantee its value only depends on local data
+                written_once = False
+                break
+            written_once = True
+    if written_once is False:
+        return False
+
+    # Never read outside of sink
+    context = [i for i in context if i not in [source, sink]]
+    if array in flatten(i.unknown for i in context):
+        return False
+
+    return True
+
+
+def bump_and_contract(targets, source, sink):
+    """
+    Transform in-place the PartialClusters ``source`` and ``sink`` by turning the
+    :class:`Array`s in ``targets`` into :class:`Scalar`. This is implemented
+    through index bumping and array contraction.
+
+    :param targets: The :class:`Array` objects that will be contracted.
+    :param source: The source :class:`PartialCluster`.
+    :param sink: The sink :class:`PartialCluster`.
+
+    Examples
+    ========
+    Index bumping
+    -------------
+    Given: ::
+
+        r[x,y,z] = b[x,y,z]*2
+
+    Produce: ::
+
+        r[x,y,z] = b[x,y,z]*2
+        r[x,y,z+1] = b[x,y,z+1]*2
+
+    Array contraction
+    -----------------
+    Given: ::
+
+        r[x,y,z] = b[x,y,z]*2
+        r[x,y,z+1] = b[x,y,z+1]*2
+
+    Produce: ::
+
+        tmp0 = b[x,y,z]*2
+        tmp1 = b[x,y,z+1]*2
+
+    Full example (bump+contraction)
+    -------------------------------
+    Given: ::
+
+        source: [r[x,y,z] = b[x,y,z]*2]
+        sink: [a = ... r[x,y,z] ... r[x,y,z+1] ...]
+        targets: r
+
+    Produce: ::
+
+        source: [tmp0 = b[x,y,z]*2, tmp1 = b[x,y,z+1]*2]
+        sink: [a = ... tmp0 ... tmp1 ...]
+    """
+    if not targets:
+        return
+    mapper = {}
+
+    # source
+    processed = []
+    for e in source.exprs:
+        function = e.lhs.base.function
+        if any(function not in i for i in [targets, sink.tensors]):
+            processed.append(e.func(e.lhs, e.rhs.xreplace(mapper)))
+        else:
+            for i in sink.tensors[function]:
+                scalarized = Scalar(name='s%d' % len(mapper)).indexify()
+                mapper[i] = scalarized
+
+                # Index bumping
+                assert len(function.indices) == len(e.lhs.indices) == len(i.indices)
+                shifting = {idx: idx + (o2 - o1) for idx, o1, o2 in
+                            zip(function.indices, e.lhs.indices, i.indices)}
+
+                # Array contraction
+                handle = e.func(scalarized, e.rhs.xreplace(mapper))
+                handle = xreplace_indices(handle, shifting)
+                processed.append(handle)
+    source.exprs = processed
+
+    # sink
+    processed = [e.func(e.lhs, e.rhs.xreplace(mapper)) for e in sink.exprs]
+    sink.exprs = processed
+
+
+def clusterize(exprs):
+    """Group a sequence of :class:`ir.Eq`s into one or more :class:`Cluster`s."""
+    # Group expressions based on data dependences
+    groups = group_expressions(exprs)
+
+    clusters = ClusterGroup()
+
+    # Coerce iteration direction of each expression in each group
+    for g in groups:
+        mapper = OrderedDict([(e, e.directions) for e in g])
+        flowmap = detect_flow_directions(g)
+        queue = list(g)
+        while queue:
+            k = queue.pop(0)
+            directions, _ = force_directions(flowmap, lambda i: mapper[k].get(i))
+            directions = {i: directions[i] for i in mapper[k]}
+            # Need update propagation ?
+            if directions != mapper[k]:
+                mapper[k] = directions
+                queue.extend([i for i in g if i not in queue])
+
+        # Wrap each tensor expression in a PartialCluster
+        for k, v in mapper.items():
+            if k.is_Tensor:
+                scalars = [i for i in g[:g.index(k)] if i.is_Scalar]
+                intervals, sub_iterators, _ = k.ispace.args
+                ispace = IterationSpace(intervals, sub_iterators, v)
+                clusters.append(PartialCluster(scalars + [k], ispace, k.dspace))
+
+    # Group PartialClusters together where possible
+    clusters = groupby(clusters)
+
+    # Introduce conditional PartialClusters
+    clusters = guard(clusters)
+
+    return clusters.finalize()
