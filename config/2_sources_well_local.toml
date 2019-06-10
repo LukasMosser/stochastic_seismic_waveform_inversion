@@ -29,7 +29,7 @@ use_disc = false
 use_well = true
 lambda_perceptual = 1.0
 lambda_fwi = 1.0
-lambda_well = 1.0
+lambda_well = 100.0
 
 [debugging]
 print_to_console = true

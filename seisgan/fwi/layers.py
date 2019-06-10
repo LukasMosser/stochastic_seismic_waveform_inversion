@@ -196,6 +196,17 @@ class FWILoss(autograd.Function):
 def to_probability(x):
     return x/2.+0.5
 
+def well_loss_old(x_geo_hat, x_geo, well_pos, channel, loss=F.binary_cross_entropy, transform=None):
+
+    wells_hat = x_geo_hat[:, channel, :, well_pos]
+    if transform is not None:
+        wells_hat = transform(wells_hat)
+
+    wells = x_geo[:, channel, :, well_pos]
+
+    loss_value = loss(wells_hat, wells, reduction="mean")
+    return loss_value
+
 
 def well_loss(x_geo_hat, x_geo, well_pos, channel, loss=F.binary_cross_entropy, transform=None):
 
