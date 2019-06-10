@@ -129,6 +129,7 @@ class FWILoss(autograd.Function):
 
         self.smooth_ds = np.zeros((self.config.time.num, 128))
 
+
         self.true_ds = []
 
         for i in range(self.config.config["nshots"]):
@@ -139,10 +140,18 @@ class FWILoss(autograd.Function):
             true_d, _, _ = self.solver.forward(src=self.config.src, m=self.config.target.m)
             self.true_ds.append(true_d)
 
+        self.clean_ds = np.zeros((self.config.time.num, 128))
+        for x in self.true_ds:
+            self.clean_ds += x.data[:]
+
         #Added noise modification to MATG submission
         for i in range(len(self.true_ds)):
             std = self.true_ds[i].data[:].std()
-            self.true_ds[i].data[:] += 0.05*std*np.random.randn(*self.true_ds[i].data[:].shape)
+            self.true_ds[i].data[:] += 0.02*std*np.random.randn(*self.true_ds[i].data[:].shape)
+
+        self.noisy_ds = np.zeros((self.config.time.num, 128))
+        for x in self.true_ds:
+            self.noisy_ds += x.data[:]
 
     def forward(self, x):
         clear_cache()
@@ -196,5 +205,5 @@ def well_loss(x_geo_hat, x_geo, well_pos, channel, loss=F.binary_cross_entropy, 
 
     wells = x_geo[:, channel, :, well_pos]
 
-    loss_value = loss(wells_hat, wells)
+    loss_value = loss(wells_hat, wells, reduction="sum")
     return loss_value

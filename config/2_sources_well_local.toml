@@ -4,9 +4,9 @@ test_image_id = 0
 num_runs = 100
 
 [storage]
-run_name = '3_sources_1_local'
+run_name = '2_sources_well_local'
 working_dir = './'
-out_folder = 'results/3_sources_1_local'
+out_folder = 'results/2_sources_well_local'
 store_gt_waveform = true
 store_final_reconstruction_waveform = true
 
@@ -16,6 +16,7 @@ wavelet_frequency = 0.01
 simulation_time = 1000.0
 top_padding = 32
 bottom_padding = 32
+noise_percent = 0.005
 
 [optimization]
 error_termination = true
@@ -25,10 +26,10 @@ learning_rate = 0.01
 final_learning_rate = 0.00001
 max_iter = 200
 use_disc = false
-use_well = false
+use_well = true
 lambda_perceptual = 1.0
 lambda_fwi = 1.0
-lambda_well = 10.0
+lambda_well = 1.0
 
 [debugging]
 print_to_console = true
