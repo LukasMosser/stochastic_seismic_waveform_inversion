@@ -1,4 +1,4 @@
-name: devito
+name: devito2
 channels:
   - defaults
   - conda-forge
@@ -28,5 +28,4 @@ dependencies:
   - frozendict
   - pip:
     - "git+https://github.com/inducer/codepy"
-    - "git+https://github.com/opesci/pyrevolve"
     - py-cpuinfo

@@ -1,37 +1,22 @@
 import torch
 import random
 import numpy as np
-
-def printgradnorm(self, grad_input, grad_output):
-    print('Inside ' + self.__class__.__name__ + ' backward')
-    print('Inside class:' + self.__class__.__name__)
-    print('')
-    print('grad_input: ', type(grad_input))
-    print('grad_input[0]: ', type(grad_input[0]))
-    print('grad_output: ', type(grad_output))
-    print('grad_output[0]: ', type(grad_output[0]))
-    print('')
-    print('grad_input size:', grad_input[0].size())
-    print('grad_output size:', grad_output[0].size())
-    print('grad_input norm:', grad_input[0].data.norm())
+import os
+import errno
 
 
-def create_grad_storage(x_in, x_out):
-    def grads(self, grad_input, grad_output):
-        print('Inside ' + self.__class__.__name__ + ' backward')
-        print('Inside class:' + self.__class__.__name__)
-        print('')
-        print('grad_input: ', type(grad_input))
-        print('grad_input[0]: ', type(grad_input[0]))
-        print('grad_output: ', type(grad_output))
-        print('grad_output[0]: ', type(grad_output[0]))
-        print('')
-        print('grad_input size:', grad_input[0].size())
-        print('grad_output size:', grad_output[0].size())
-        print('grad_input norm:', grad_input[0].data.norm())
-        x_in = grad_input
-        x_out = grad_output
-    return grads
+def tn(n):
+    return n.data.cpu().numpy()
+
+
+def output_to_tensorboard(writer, loss_vars, loss_names, iteration):
+    for ls, name in zip(loss_vars, loss_names):
+        writer.add_scalar(name, ls, global_step=iteration)
+
+
+def output_losses(logger, loss_vars, loss_names, run_number, iteration):
+    for ls, name in zip(loss_vars, loss_names):
+        logger.info('Model Inference Run: {:1d}, Iteration: {:1d}, {}: {:1.2f}'.format(run_number, iteration, name, float(ls)))
 
 
 def set_seed(seed):
@@ -50,3 +35,11 @@ def set_seed(seed):
     torch.backends.cudnn.enabled = False
 
     return True
+
+
+def make_dir(path):
+    try:
+        os.makedirs(path)
+    except OSError as e:
+        if e.errno != errno.EEXIST:
+            raise

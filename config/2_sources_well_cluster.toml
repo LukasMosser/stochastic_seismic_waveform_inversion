@@ -1,0 +1,35 @@
+﻿title = 'Config File for 3 sources and no well'
+
+test_image_id = 0
+num_runs = 100
+
+[storage]
+run_name = '2_sources_well_local'
+working_dir = './'
+out_folder = 'results/2_sources_well_local'
+store_gt_waveform = true
+store_final_reconstruction_waveform = true
+
+[simulation]
+sources = 2
+wavelet_frequency = 0.01
+simulation_time = 1000.0
+top_padding = 32
+bottom_padding = 32
+noise_percent = 0.005
+
+[optimization]
+error_termination = true
+seismic_relative_error = 0.1
+well_accuracy = 0.95
+learning_rate = 0.01
+final_learning_rate = 0.00001
+max_iter = 200
+use_disc = false
+use_well = true
+lambda_perceptual = 1.0
+lambda_fwi = 1.0
+lambda_well = 100.0
+
+[debugging]
+print_to_console = true

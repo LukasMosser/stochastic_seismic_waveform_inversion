@@ -1,8 +1,6 @@
 from torch.optim import Optimizer
 from torch.distributions import Normal
-import numpy as np
 import torch
-import math
 
 
 class MALA(Optimizer):
@@ -103,7 +101,7 @@ class SGHMC(Optimizer):
 
                 param_state = self.state[p]
                 if 'momentum_buffer' not in param_state:
-                    buf = param_state['momentum_buffer'] = torch.zeros_like(d_p)#torch.clone(d_p).detach()
+                    buf = param_state['momentum_buffer'] = torch.zeros_like(d_p)
                 else:
                     buf = param_state['momentum_buffer']
 
@@ -116,8 +114,6 @@ class SGHMC(Optimizer):
                 #delta v: -nu*grad P - alpha *v + N(0, 2*(alpha-beta)*I)
                 #delta theta = v
                 deltav = -group['lr']*d_p.data-group['nu']*buf+noise.sample()
-
-                #buf.mul_(-group['nu']).add_(-group['lr'], d_p.data).add_(1.0, noise.sample())
 
                 p.data.add_(buf)
                 buf.add_(1.0, deltav)

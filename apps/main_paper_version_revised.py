@@ -1,5 +1,4 @@
 import sys
-#sys.path.append("./devito")
 
 import argparse
 import logging
@@ -13,11 +12,9 @@ import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 
 from seisgan.fwi import layers
-from seisgan.networks import GeneratorMultiChannel, HalfChannels, DiscriminatorUpsampling, HalfChannelsTest
+from seisgan.networks import GeneratorMultiChannel, HalfChannels, HalfChannelsTest
 from seisgan.optimizers import MALA, SGHMC
-from seisgan.utils import set_seed, make_dir
-from seisgan.tensorboard_utils import add_model_to_writer, add_seismic_to_writer
-
+from seisgan.utils import set_seed, make_dir, tn, output_losses, output_to_tensorboard
 
 # Writer will output to ./runs/ directory by default
 parser = argparse.ArgumentParser()
@@ -46,8 +43,8 @@ parser.add_argument("--noise_percent", type=float, default=0.02, help="Percent o
 parser.add_argument("--error_termination", action="store_true", help="Terminate only if error reached")
 parser.add_argument("--seismic_relative_error", type=float, default=0.1, help="Target Relative Error")
 parser.add_argument("--well_accuracy", type=float, default=0.95, help="Target Well Accuracy")
-parser.add_argument("--use_disc", action="store_true", help="Use discriminator loss")
 parser.add_argument("--use_well", action="store_true", help="Use well loss")
+parser.add_argument("--well_position", type=int, default=64, help="Position of the well")
 
 parser.add_argument("--learning_rate", type=float, default=1e-2, help="Learning Rate")
 parser.add_argument("--final_learning_rate", type=float, default=0.00001, help="Final Learning Rate")
@@ -67,17 +64,18 @@ working_dir = args.working_dir
 out_folder = args.run_name
 run_name = args.run_name+"_"+str(args.seed)
 
-loss_names = ["Disc", "Facies", "Vp", "FWI"]
+monitored_variables = []
 if args.use_well:
-    loss_names = ["Disc", "Facies", "FWI"]
-elif not args.use_well:
-    loss_names = ["Disc", "FWI"]
+    monitored_variables += ["Well-Loss", "Well-Accuracy", "gradient/Well-Loss-Grad-Norm"]
+monitored_variables += ["Pior-Loss", "gradient/Prior-Loss-Grad-Norm", "FWI", "FWI-L1", "FWI-L2", "Shot-Noise-Norm", "gradient/FWI-Grad-Norm", "gradient/Total-Grad-Norm", "Learning-Rate", "Latent-Variable-Std-Dev"]
 
 log_path = os.path.expandvars(working_dir+"/"+out_folder+"/"+"logs")
 
 latent_variables_out_path = os.path.expandvars(working_dir+"/"+out_folder+"/"+run_name+"_latents_")
 shots_out_path = os.path.expandvars(working_dir+"/"+out_folder+"/"+run_name+"_shots_")
 losses_out_path = os.path.expandvars(working_dir+"/"+out_folder+"/"+run_name+"_losses_")
+errors_out_path = os.path.expandvars(working_dir+"/"+out_folder+"/"+run_name+"_errors_")
+gt_norms_out_path = os.path.expandvars(working_dir+"/"+out_folder+"/"+run_name+"_gtnorms_")
 
 make_dir(log_path)
 make_dir(os.path.expandvars(working_dir+"/"+out_folder))
@@ -108,8 +106,6 @@ testimgs_path = os.path.expandvars(args.testimgs_path)
 
 logger.info('Expanded Variables')
 
-tn = lambda n: n.data.cpu().numpy()
-
 configuration = {"t0": 0.,
                  "tn": args.simulation_time,
                  "shape": (128, args.bottom_padding+64+args.top_padding),
@@ -132,12 +128,6 @@ generator.load_state_dict(new_state_dict)
 generator.cpu()
 generator.eval()
 
-discriminator = DiscriminatorUpsampling()
-new_state_dict = torch.load(discriminator_path)
-discriminator.load_state_dict(new_state_dict)
-discriminator.cpu()
-discriminator.eval()
-
 logger.info('Loaded Networks')
 
 minsmaxs = np.load(minsmaxs_path)
@@ -155,8 +145,8 @@ with torch.no_grad():
 logger.info('Loaded GT facies')
 
 fwi_model_config = layers.FWIConfiguration(configuration, tn(x_gt)[0, 0])
-fwi_loss = layers.FWILoss(fwi_model_config)
-gt_sum = np.sum([x_i.data for x_i in fwi_loss.true_ds], 0)
+fwi = layers.FWILoss(fwi_model_config)
+gt_sum = np.sum([x_i.data for x_i in fwi_model_config.true_ds], 0)
 
 if args.store_gt_waveform:
     np.save(shots_out_path+"gt.npy", gt_sum)
@@ -168,7 +158,7 @@ model_try = 0
 while num_count < args.num_runs:
     seed = np.random.randint(low=0, high=2**31)
     set_seed(seed)
-    logger.info('Started Model Inference: '+str(num_count))
+    logger.info('Started Optimization: '+str(num_count))
 
     if args.tensorboard:
         writer = SummaryWriter(log_dir=os.path.expandvars(working_dir+"/"+"tensorboard"+"/run_"+str(int(seed))))
@@ -176,161 +166,106 @@ while num_count < args.num_runs:
     z_star = torch.randn(1, 50, 1, 2)
     z_star.requires_grad = True
 
-    optimizer = MALA([z_star], lr=args.learning_rate, weight_decay=args.weight_decay)#SGHMC([z_star], lr=config["optimization"]["learning_rate"], nu=0.1)#MALA([z_star], lr=config["optimization"]["learning_rate"], weight_decay=0.0)#SGD([z_star], lr=config["optimization"]["learning_rate"], weight_decay=1e-5) #Adam([z_star], lr=config["optimization"]["learning_rate"])
-    losses = []
-    zs = []
-    shots = []
-    losses_total = []
-    pred_sum = None
-    latent_diverged = False
+    # Initialize MALA sampler
+    optimizer = MALA([z_star], lr=args.learning_rate, weight_decay=0.0)
+    losses, shots = [], []
+    zs = [z_star.detach().numpy().copy()]
+
+    pred_sum, latent_diverged = None, False
+
     acc = 0.0
     for i in range(0, args.max_iter):
-        loss_vars = []
+        # Reset Gradients
         optimizer.zero_grad()
+
+        # Forward Pass Latent Space to get model representation
         x_star, x_geo = half_channel_gen(z_star)
 
-        if args.use_disc:
-            d = -args.lambda_perceptual*discriminator(x_geo).mean()
-            loss_vars.append(d)
+        monitor_losses = []
+        current_grad_norm = 0.
 
+        # If optimizing the wells, compute binary cross-entropy at well location
         if args.use_well:
             for channel, lambd, loss_type, transform, name in zip([0], [args.lambda_well],
                                                                   [torch.nn.functional.binary_cross_entropy],
                                                                   [layers.to_probability],
                                                                   ["Facies"]):
-                for well in [64]:
-                    well_loss = lambd * layers.well_loss_old(x_geo, x_gt_facies.float(), well, channel,
-                                                         loss=loss_type, transform=transform)
+                for well in [args.well_position]:
+                    well_loss = layers.well_loss(x_geo, x_gt_facies.float(), well, channel, loss=loss_type, transform=transform)
 
-                    acc = accuracy_score(tn(x_gt_facies)[:, 0, :, 64].flatten().astype(int),
-                                         np.where(layers.to_probability(tn(x_geo)[:, 0, :, 64]).flatten() > 0.5, 1, 0))
-                    print(acc)
+                    acc = accuracy_score(tn(x_gt_facies)[:, 0, :, args.well_position].flatten().astype(int),
+                                         np.where(layers.to_probability(tn(x_geo)[:, 0, :, args.well_position]).flatten() > 0.5, 1, 0))
 
-                    well_loss.backward(retain_graph=True)
-                    #if i < 20:
-                    #    nn.utils.clip_grad_norm_(z_star, 10.0)
-                    if args.tensorboard:
-                        writer.add_scalar("well_acc", acc, global_step=i)
-                        writer.add_scalar("well_loss", well_loss, global_step=i)
-                        writer.add_scalar("well_grad_norm", z_star.grad.norm(), global_step=i)
+                    well_loss.backward(retain_graph=True)  # keep graph active so we can continue to backprop
+                    monitor_losses.append(tn(well_loss))
+                    monitor_losses.append(acc)
 
-        #if args.tensorboard:
-        #    add_seismic_to_writer("seismic_noise", writer, fwi_loss.true_ds, i)
+                    well_loss_grad_norm = tn(z_star.grad.norm())
+                    monitor_losses.append(well_loss_grad_norm)
+                    current_grad_norm += well_loss_grad_norm # Store temporary grad norm so we can see which variables are contributing to loss
 
-        l = args.lambda_fwi*fwi_loss(x_star)
-        loss_vars.append(l)
+        # Compute Prior loss based on Gaussian latent space prior
+        prior_loss = layers.compute_prior_loss(z_star, 1.0)
+        prior_loss.backward(retain_graph=True) # Kep graph active so we can continue to backprop
+        prior_loss_grad_norm = tn(z_star.grad.norm())-current_grad_norm
+        monitor_losses.extend([tn(prior_loss), prior_loss_grad_norm])
+        current_grad_norm += prior_loss_grad_norm
 
-        pred_sum = fwi_loss.smooth_ds
+        # Compute FWI-Loss
+        fwi = layers.FWILoss(fwi_model_config)
+        fwi_loss = args.lambda_fwi*fwi(x_star)
+        pred_sum = fwi.smooth_ds
+        l1_norm = np.linalg.norm(gt_sum-pred_sum, 1)
+        l2_norm = np.linalg.norm(pred_sum-gt_sum)
+        monitor_losses.extend([fwi_loss.item(), l1_norm, l2_norm, fwi_model_config.noise_norm])
 
-        #if args.tensorboard:
-        #    add_seismic_to_writer("seismic_synth", writer, fwi_loss.smooth_ds, i, sum=False)
+        fwi_loss.backward()
+        fwi_grad_norm = tn(z_star.grad.norm())-current_grad_norm
+        monitor_losses.append(fwi_grad_norm)
+        current_grad_norm += fwi_grad_norm
+        monitor_losses.append(current_grad_norm)
 
-        print(x_star.size())
-
-        #if args.tensorboard:
-        #    add_model_to_writer("model", writer, x_geo[0, 0].detach().cpu().numpy(), i)
-
-        rmse_noise = np.sqrt(np.mean((fwi_loss.noisy_ds-fwi_loss.clean_ds)**2))
-        rmse_inversion = np.sqrt(np.mean((pred_sum-fwi_loss.clean_ds)**2))
-
-        print(rmse_noise)
-        print(rmse_inversion)
-        print(rmse_inversion/rmse_noise)
-
-        error = np.linalg.norm(pred_sum-gt_sum)
-        rel_error = error/np.linalg.norm(gt_sum)
-
-        print(np.linalg.norm(fwi_loss.noisy_ds-fwi_loss.clean_ds)/np.linalg.norm(fwi_loss.clean_ds))
-
-        losses.append(rel_error)
-
-        total_losses_sum = sum(loss_vars)
-        total_losses_sum.backward()
-
+        # Step MALA forward one iteration
         optimizer.step()
 
-        zs.append(z_star.data.numpy().copy())
-
+        # Anneal Step Size
         for param_group in optimizer.param_groups:
             param_group['lr'] -= (args.learning_rate-args.final_learning_rate)/args.max_iter
             lr = param_group['lr']
+        monitor_losses.append(lr)
 
-        print(lr)
+        # Monitor the latent space after the MALA step
+        latent_space_standard_dev = z_star.std().data.numpy()
+        zs.append(z_star.data.numpy().copy())
+        monitor_losses.append(latent_space_standard_dev)
 
-        print(z_star.std())
-
+        # Output to logger or tensorboard
+        losses.append(monitor_losses)
+        output_losses(logger, monitor_losses, monitored_variables, num_count, i)
         if args.tensorboard:
-            writer.add_scalar("lr", lr, global_step=i)
-            writer.add_scalar("z_std", z_star.std(), global_step=i)
-            writer.add_scalar("z_grad_norm", z_star.grad.norm(), global_step=i)
-            writer.add_scalar("rel_error", rel_error, global_step=i)
+            output_to_tensorboard(writer, monitor_losses, monitored_variables, i)
 
-        if z_star.std().data.numpy() > 5.0:
-            logger.info(
-                'NOT COMPLETED Optimization, Latent Space Diverged')
+        # Check whether the latent space has diverged if yes, reset
+        if latent_space_standard_dev > 5.0:
+            logger.info('NOT COMPLETED Optimization, Latent Space Diverged')
+            output_losses(logger, monitor_losses, monitored_variables, num_count, i)
             latent_diverged = True
             model_try += 1
             break
 
-        for ls, name in zip(loss_vars, loss_names):
-            logger.info('Optimization: ' + str(num_count) + ' Iteration: ' + str(i) + " " +name+': ' + str(tn(ls)))
-        logger.info('Optimization: ' + str(num_count) + ' Iteration: ' + str(i) + " " + "Relative Error" + ': ' + str(rel_error))
-        if args.use_well:
-            logger.info('Optimization: ' + str(num_count) + ' Iteration: ' + str(i) + ' Accuracy: ' + str(acc))
+    if ((not args.use_well) or (args.use_well and acc >= args.well_accuracy)) and not latent_diverged:
+        logger.info('COMPLETED Optimization')
+        output_losses(logger, monitor_losses, monitored_variables, num_count, i)
 
-    if not args.error_termination:
-        if rel_error <= args.seismic_relative_error and (args.use_well and acc >= args.well_accuracy):
-            logger.info('COMPLETED Optimization: ' + str(num_count) + ' Iteration: ' + str(i) + ' Loss: ' + str(rel_error))
-
-            zs_out = np.array(zs)
-            np.save(latent_variables_out_path+str(num_count)+".npy", zs_out)
-            if args.store_final_reconstruction_waveform:
-                np.save(shots_out_path + str(num_count) + ".npy", pred_sum)
-            np.save(losses_out_path+str(num_count)+".npy", np.array(losses))
-            num_count += 1
-            model_try += 1
-            break
-
-        elif rel_error <= args.seismic_relative_error and not args.use_well:
-            logger.info('COMPLETED Optimization: ' + str(num_count) + ' Iteration: ' + str(i) + ' Loss: ' + str(rel_error))
-
-            zs_out = np.array(zs)
-            np.save(latent_variables_out_path + str(num_count) + ".npy", zs_out)
-            if args.store_final_reconstruction_waveform:
-                np.save(shots_out_path + str(num_count) + ".npy", pred_sum)
-            np.save(losses_out_path + str(num_count) + ".npy", np.array(losses))
-            num_count += 1
-            model_try += 1
-            break
-    fwi_loss.reset()
-
-    print(acc)
-    if args.error_termination and not latent_diverged:
-        if rel_error <= args.seismic_relative_error and (args.use_well and acc >= args.well_accuracy):
-            logger.info(
-                'COMPLETED Optimization: ' + str(num_count) + ' Iteration: ' + str(i) + ' Loss: ' + str(rel_error))
-
-            zs_out = np.array(zs)
-            np.save(latent_variables_out_path + str(num_count) + ".npy", zs_out)
-            if args.store_final_reconstruction_waveform:
-                np.save(shots_out_path + str(num_count) + ".npy", pred_sum)
-            np.save(losses_out_path + str(num_count) + ".npy", np.array(losses))
-            num_count += 1
-            model_try += 1
-
-        elif rel_error <= args.seismic_relative_error and not args.use_well:
-            logger.info(
-                'COMPLETED Optimization: ' + str(num_count) + ' Iteration: ' + str(i) + ' Loss: ' + str(rel_error))
-
-            zs_out = np.array(zs)
-            np.save(latent_variables_out_path + str(num_count) + ".npy", zs_out)
-            if args.store_final_reconstruction_waveform:
-                np.save(shots_out_path + str(num_count) + ".npy", pred_sum)
-            np.save(losses_out_path + str(num_count) + ".npy", np.array(losses))
-            num_count += 1
-            model_try += 1
-
-        else:
-            logger.info(
-                'NOT COMPLETED Optimization: ' + str(num_count) + ' Iteration: ' + str(i) + ' Loss: ' + str(rel_error))
+        zs_out = np.array(zs)
+        np.save(latent_variables_out_path + str(num_count) + ".npy", zs_out)
+        if args.store_final_reconstruction_waveform:
+            np.save(shots_out_path + str(num_count) + ".npy", pred_sum)
+        np.save(losses_out_path + str(num_count) + ".npy", np.array(losses))
+        num_count += 1
+    else:
+        logger.info('NOT COMPLETED Optimization')
+        output_losses(logger, monitor_losses, monitored_variables, num_count, i)
+    model_try += 1
+    fwi.reset()
 

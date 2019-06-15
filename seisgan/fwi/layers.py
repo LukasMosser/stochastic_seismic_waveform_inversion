@@ -99,6 +99,32 @@ class FWIConfiguration(object):
         self.src = self.create_source()
         self.rec = self.create_recorders()
 
+        self.solver = AcousticWaveSolver(self.target, self.src, self.rec, space_order=4)
+
+        self.true_ds = []
+        for i in range(self.config["nshots"]):
+            # Update source location
+            self.src.coordinates.data[0, :] = self.source_locations[i, :]
+
+            # Generate synthetic data from true model
+            true_d, _, _ = self.solver.forward(src=self.src, m=self.target.m)
+            self.true_ds.append(true_d)
+
+        self.clean_ds = np.zeros((self.time.num, 128))
+        for x in self.true_ds:
+            self.clean_ds += x.data[:]
+
+        self.noise_norm = 0.
+        #Added noise modification to MATG submission
+        for i in range(len(self.true_ds)):
+            std = self.true_ds[i].data[:].std()
+            noise = self.config["noise_percent"]*std*np.random.randn(*self.true_ds[i].data[:].shape)
+            self.noise_norm += 0.5*np.linalg.norm(noise)**2
+            self.true_ds[i].data[:] += noise
+
+        self.noisy_ds = np.zeros((self.time.num, 128))
+        for x in self.true_ds:
+            self.noisy_ds += x.data[:]
 
     def create_source(self):
         #
@@ -121,37 +147,13 @@ class FWILoss(autograd.Function):
         super(FWILoss, self).__init__()
 
         self.config = configuration
-        self.solver = AcousticWaveSolver(self.config.target, self.config.src, self.config.rec, space_order=4)
+        #self.solver = AcousticWaveSolver(self.config.target, self.config.src, self.config.rec, space_order=4)
         self.gradient, self.residual = None, None
 
         self.residual = Receiver(name='rec', grid=self.config.target.grid,
                                  time_range=self.config.time, coordinates=self.config.rec.coordinates.data)
 
         self.smooth_ds = np.zeros((self.config.time.num, 128))
-
-
-        self.true_ds = []
-
-        for i in range(self.config.config["nshots"]):
-            # Update source location
-            self.config.src.coordinates.data[0, :] = self.config.source_locations[i, :]
-
-            # Generate synthetic data from true model
-            true_d, _, _ = self.solver.forward(src=self.config.src, m=self.config.target.m)
-            self.true_ds.append(true_d)
-
-        self.clean_ds = np.zeros((self.config.time.num, 128))
-        for x in self.true_ds:
-            self.clean_ds += x.data[:]
-
-        #Added noise modification to MATG submission
-        for i in range(len(self.true_ds)):
-            std = self.true_ds[i].data[:].std()
-            self.true_ds[i].data[:] += 0.02*std*np.random.randn(*self.true_ds[i].data[:].shape)
-
-        self.noisy_ds = np.zeros((self.config.time.num, 128))
-        for x in self.true_ds:
-            self.noisy_ds += x.data[:]
 
     def forward(self, x):
         clear_cache()
@@ -170,23 +172,28 @@ class FWILoss(autograd.Function):
             self.config.src.coordinates.data[0, :] = self.config.source_locations[i, :]
 
             # Compute smooth data and full forward wavefield u0
-            smooth_d, u0, _ = self.solver.forward(src=self.config.src, m=self.config.input_m.m, save=True)
+            smooth_d, u0, _ = self.config.solver.forward(src=self.config.src, m=self.config.input_m.m, save=True)
 
             self.smooth_ds += smooth_d.data[:]
             # Compute gradient from data residual and update objective function
-            self.residual.data[:] = smooth_d.data[:] - self.true_ds[i].data[:]
+            self.residual.data[:] = smooth_d.data[:] - self.config.true_ds[i].data[:]
 
-            objective += np.linalg.norm(self.residual.data.reshape(-1))
+            objective += 0.5*np.linalg.norm(self.residual.data.reshape(-1))**2
 
-            self.solver.gradient(rec=self.residual, u=u0, m=self.config.input_m.m, grad=grad)
+            self.config.solver.gradient(rec=self.residual, u=u0, m=self.config.input_m.m, grad=grad)
 
-        self.gradient = torch.from_numpy(grad.data)[self.config.config["nbpml"]:-self.config.config["nbpml"],
-                                                    self.config.config["nbpml"]:-self.config.config["nbpml"]]
+        gradient = torch.from_numpy(grad.data.copy())[self.config.config["nbpml"]:-self.config.config["nbpml"],
+                                                      self.config.config["nbpml"]:-self.config.config["nbpml"]]
+        self.gradient = gradient
+        self.save_for_backward(gradient)
+
         del grad
+
         return torch.from_numpy(np.array([objective])).float()
 
     def backward(self, grad_output):
-        grad_input = (self.gradient/self.gradient.max()).unsqueeze(0).unsqueeze(0)
+        gradient = self.saved_tensors[0]
+        grad_input = (gradient/gradient.abs().max()).unsqueeze(0).unsqueeze(0)
         return grad_input, None
 
     def reset(self):
@@ -218,3 +225,17 @@ def well_loss(x_geo_hat, x_geo, well_pos, channel, loss=F.binary_cross_entropy, 
 
     loss_value = loss(wells_hat, wells, reduction="sum")
     return loss_value
+
+def compute_prior_loss(z, alpha=1.):
+    """
+
+    Computes prior loss according to Creswell 2016
+
+    :param z: latent vector
+    :param alpha: weight of prior loss
+    :return: log probability of the gaussian latent variables
+    """
+    pdf = torch.distributions.Normal(0, 1)
+    logProb = pdf.log_prob(z.view(1, -1)).sum(dim=1)
+    prior_loss = -alpha*logProb
+    return prior_loss
