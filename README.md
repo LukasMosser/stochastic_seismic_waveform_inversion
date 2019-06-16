@@ -17,7 +17,7 @@ The coupling between the two defines a fully differentiable computational graph.
 
 ## Movie representation of samples from the posterior (27 sources)
 
-<img src="https://github.com/LukasMosser/DeepFlow/stochastic_seismic_waveform_inversion/master/results/animations/movie_posterior.gif" width="400">
+<img src="https://github.com/LukasMosser/stochastic_seismic_waveform_inversion/raw/master/results/animations/movie_posterior.gif" width="400">
 
 ## Usage
 
