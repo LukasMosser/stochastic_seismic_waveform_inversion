@@ -6,9 +6,9 @@ Authors: [Lukas Mosser](https://twitter.com/porestar), [Olivier Dubrule](https:/
 
 ## Model Architecture
 
-The model architecture consists of two parts: 
- - the generative adversarial network (implemented in [Pytorch](https://pytorch.org)) 
- - the acoustic wave equation forward solver implemented in  ([Devito](https://www.opesci.org/devito)).
+The model architecture consists of two parts:  
+ - the generative adversarial network (implemented in [Pytorch](https://pytorch.org))   
+ - the acoustic wave equation forward solver implemented in  ([Devito](https://www.opesci.org/devito)).  
 The coupling between the two defines a fully differentiable computational graph.
 
 ## Movie representation of samples from the prior
@@ -21,7 +21,7 @@ The coupling between the two defines a fully differentiable computational graph.
 
 ## Usage
 
-To perform the inversion using the available pre-trained generator network use ``` apps/main_paper_version_revised.py ```
+To perform the inversion using the available pre-trained generator network use ``` apps/main_paper_version_revised.py ```  
 (Sorry for the long name, but older versions of the code were kept for reference purposes)
   
 ## Trained Models
@@ -32,12 +32,12 @@ Pre-trained models are available in the  [checkpoints](checkpoints/) directory.
 The resulting datasets are available in this [Google Drive](https://drive.google.com/drive/folders/1xLkLwDxAGVmfz-o2DzImgr8fP0fQNHW4?usp=sharing)  
  
 Each run was made reproducible by setting the run-number = seed command-line argument.  
-Computations were performed on Imperial College CX1 supercomputing facilities.
+Computations were performed on Imperial College CX1 supercomputing facilities.  
 Total duration: 12 hours wall-time on 32-core nodes ~ 50 nodes simultaneously.  
 
 ## Figures from paper
 
-The figures from the paper can be reproduced using ```notebooks/Paper_Figures.ipynb```.
+The figures from the paper can be reproduced using ```notebooks/Paper_Figures.ipynb```.  
 All figures are located in ```results/figures```
 
 ## Devito Optimizations
