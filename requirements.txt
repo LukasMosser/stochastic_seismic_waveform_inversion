@@ -22,3 +22,7 @@ frozendict
 git+https://github.com/opesci/pyrevolve
 torch
 torchvision
+tqdm
+scikit-learn
+scikit-image
+tensorboard
