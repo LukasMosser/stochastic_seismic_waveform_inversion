@@ -1,5 +1,9 @@
 import sys
 
+import sys
+sys.path
+sys.path.append('/opt/dnn')
+
 import argparse
 import logging
 import os
