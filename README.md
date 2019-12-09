@@ -1,4 +1,4 @@
-GAN
+Adapted by Jonas Mendonça Targino
 
 # Stochastic seismic waveform inversion using generative adversarial networks as a geological prior
 
