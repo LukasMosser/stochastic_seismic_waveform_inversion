@@ -4,9 +4,11 @@ import torch.autograd as autograd
 import torch.nn.functional as F
 from devito import Function, clear_cache
 
-from .pde.seismic.model import Model
+#from .pde.seismic.model import Model
 from .pde.seismic.acoustic import AcousticWaveSolver
-from .pde.seismic import RickerSource, Receiver
+#from .pde.seismic import RickerSource, Receiver
+from examples.seismic import RickerSource, Receiver, Model#, demo_model
+#from .pde.seismic import Receiver
 
 from cached_property import cached_property
 
