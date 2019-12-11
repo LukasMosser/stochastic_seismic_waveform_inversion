@@ -1,5 +1,10 @@
 import sys
 
+import sys
+sys.path
+path_gan = '/home/jonas/Desktop/GAN/'
+sys.path.append(path_gan)
+
 import argparse
 import logging
 import os
@@ -126,18 +131,21 @@ def main(args):
                      }
 
     generator = GeneratorMultiChannel()
+    generator_path = path_gan+'checkpoints/'+'generator_facies_multichannel_4_6790.pth'
     new_state_dict = torch.load(generator_path)
     generator.load_state_dict(new_state_dict)
     generator.cpu()
     generator.eval()
 
     logger.info('Loaded Networks')
-
+    
+    minsmaxs_path = path_gan+'data/'+'half_circle_facies_vp_rho_mean_std_min_max.npy'
     minsmaxs = np.load(minsmaxs_path)
 
     half_channel_gen = HalfChannels(generator, min_vp=minsmaxs[2, 1], max_vp=minsmaxs[3, 1], vp_bottom=1.8, vp_top=1.8, top_size=args.top_padding)
     half_channel_test = HalfChannelsTest(min_vp=minsmaxs[2, 1], max_vp=minsmaxs[3, 1], vp_bottom=1.8, vp_top=1.8, top_size=args.top_padding)
-
+    
+    testimgs_path= path_gan+'data/'+'test_half_circle_facies_vp_rho.npy'
     gt_image = np.load(testimgs_path)[args.test_image_id]
 
     x_gt = torch.from_numpy(gt_image).float().unsqueeze(0)

@@ -1,7 +1,8 @@
 from scipy import signal
 from scipy.interpolate import CubicSpline
 from devito import Dimension
-from devito.function import SparseTimeFunction
+#from devito.function import SparseTimeFunction
+from devito import SparseTimeFunction
 
 from cached_property import cached_property
 
